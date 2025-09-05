@@ -43,6 +43,22 @@ Same gRPC interface as the Python version:
 - `Ping(PingRequest) -> PingResponse`
 - `FetchImportBatch(FetchImportBatchRequest) -> FetchImportBatchResponse`
 
+## Usage Examples
+
+### Testing with grpcurl
+
+```bash
+# Fetch a batch for nodes from full import data
+grpcurl -plaintext -proto proto/osm_import.proto \
+    -d '{"batch_number": 0, "full_date": "250901", "element_type": "node"}' \
+    localhost:8080 osm_import.OSMImport/FetchImportBatch
+
+# Test ping endpoint
+grpcurl -plaintext -proto proto/osm_import.proto \
+    -d '{"message": "hello"}' \
+    localhost:8080 osm_import.OSMImport/Ping
+```
+
 ## Implementation Notes
 
 This is a minimal drop-in replacement for the Python service. It handles:
