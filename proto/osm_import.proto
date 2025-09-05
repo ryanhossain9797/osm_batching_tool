@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package osm_import;
+option csharp_namespace = "SuiteGIS.Types.OSMImport";
+
+service OSMImport {
+	rpc Ping(PingRequest) returns (PingResponse);
+	rpc FetchImportBatch(FetchImportBatchRequest) returns (FetchImportBatchResponse);
+}
+
+message PingRequest {
+	string message = 1;
+}
+
+message PingResponse {
+	string message = 1;
+}
+
+message FetchImportBatchRequest {
+	int64 batch_number = 1;
+	oneof import_type {
+		string full_date = 2;
+		string delta_abc = 3;
+	}
+	string element_type = 4;
+}
+
+message FetchImportBatchResponse {
+	oneof response {
+		string batches_pending  = 1;
+		string batch_content    = 2;
+		string batches_complete = 3;
+		string error            = 4;
+	}
+}
