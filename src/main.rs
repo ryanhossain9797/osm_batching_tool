@@ -1,4 +1,4 @@
-use osm_import_rust;
+use osm_import_rust::{self, ImportOptions, OsmFileType};
 use std::env;
 use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
@@ -15,15 +15,16 @@ use osm_import::{
     FetchImportBatchRequest, FetchImportBatchResponse, PingRequest, PingResponse,
 };
 
-fn get_import_details(
-    import_type: Option<ImportType>,
-) -> Result<(&'static str, String, String, &'static str), String> {
+fn get_import_details(import_type: Option<ImportType>) -> Result<ImportOptions, String> {
     match import_type {
         Some(ImportType::FullDate(date)) => {
             if !date.chars().all(|c| c.is_ascii_digit()) || date.len() != 6 {
                 Err("date arg invalid (expected ddmmyy)".to_string())
             } else {
-                Ok(("full", date.clone(), date.clone(), ".osm"))
+                Ok(ImportOptions {
+                    osm_file_type: OsmFileType::Full(date.clone()),
+                    base_path: "./data/".to_string(),
+                })
             }
         }
         Some(ImportType::DeltaAbc(abc)) => {
@@ -31,7 +32,10 @@ fn get_import_details(
             {
                 Err("abc arg invalid (expected AAA/BBB/CCC)".to_string())
             } else {
-                Ok(("delta", abc.clone(), abc.replace("/", "_"), ".osc"))
+                Ok(ImportOptions {
+                    osm_file_type: OsmFileType::Delta(abc.clone()),
+                    base_path: "./data/".to_string(),
+                })
             }
         }
         None => Err("import type is unknown".to_string()),
@@ -58,22 +62,16 @@ async fn try_get_batch_file(batch_file: &str) -> Option<Result<String, String>> 
     }
 }
 
-async fn maybe_start_background_processing(
-    import_type: &'static str,
-    import_scope: String,
-    import_dir: String,
-) {
-    let import_lock_file = format!("{import_dir}/lock");
+async fn maybe_start_background_processing(import_options: ImportOptions) {
+    let import_lock_file = import_options.get_lock_file();
     if !Path::new(&import_lock_file).exists() {
-        info!("🚀 No lock file found - starting background processing for {import_type} {import_scope}");
+        info!("🚀 No lock file found - starting background processing");
         tokio::spawn(async move {
-            info!("🎯 Background task started for {import_type} {import_scope}");
-            if let Err(e) =
-                osm_import_rust::process_osm_import(&import_type, &import_scope, &import_dir).await
-            {
-                error!("💥 Background processing failed for {import_type} {import_scope}: {e}");
+            info!("🎯 Background task started");
+            if let Err(e) = osm_import_rust::process_osm_import(&import_options).await {
+                error!("💥 Background processing failed: {e}");
             } else {
-                info!("🎉 Background processing completed successfully for {import_type} {import_scope}");
+                info!("🎉 Background processing completed successfully");
             }
         });
     } else {
@@ -98,32 +96,19 @@ impl OsmImport for OSMImportService {
     ) -> Result<Response<FetchImportBatchResponse>, Status> {
         let req: FetchImportBatchRequest = request.into_inner();
 
-        let (import_type, import_scope, import_arg_dir, import_file_extension) =
-            match get_import_details(req.import_type) {
-                Ok(details) => details,
-                Err(e) => {
-                    return Ok(Response::new(FetchImportBatchResponse {
-                        response: Some(BatchResponse::Error(e)),
-                    }))
-                }
-            };
+        let import_options = match get_import_details(req.import_type) {
+            Ok(details) => details,
+            Err(e) => {
+                return Ok(Response::new(FetchImportBatchResponse {
+                    response: Some(BatchResponse::Error(e)),
+                }))
+            }
+        };
 
-        let import_dir = format!("./data/{import_type}/{import_arg_dir}");
-        let import_lock_file = format!("{import_dir}/lock");
-        let import_file = format!("{import_arg_dir}{import_file_extension}");
+        let batch_file =
+            import_options.get_batch_file(&req.element_type, req.batch_number as usize);
 
-        let batch_file = format!(
-            "{}/batches/{}/{}.batch_{:06}.xml",
-            import_dir, req.element_type, import_file, req.batch_number
-        );
-
-        let batches_complete_file = format!(
-            "{}/batches/{}/{}.batches_complete",
-            import_dir, req.element_type, import_file
-        );
-
-        info!("📁 File paths configured -> import_dir: {import_dir}, import_lock_file: {import_lock_file}, batch_file: {batch_file}, batches_complete_file: {batches_complete_file}");
-        info!("🔍 Checking if batch file exists: {batch_file}");
+        let batches_complete_file = import_options.get_batches_complete_file(&req.element_type);
 
         let maybe_existing_file = try_get_batch_file(&batch_file).await;
 
@@ -142,7 +127,7 @@ impl OsmImport for OSMImportService {
             });
 
         if should_attempt_import {
-            maybe_start_background_processing(&import_type, import_scope, import_dir).await;
+            maybe_start_background_processing(import_options).await;
         }
 
         Ok(Response::new(FetchImportBatchResponse {

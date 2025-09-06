@@ -1,12 +1,12 @@
-use std::path::Path;
-use tokio::fs;
 use anyhow::Result;
-use tracing::{info, warn, error};
+use flate2::read::GzDecoder;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use reqwest;
-use flate2::read::GzDecoder;
 use regex::Regex;
+use reqwest;
+use std::path::Path;
+use tokio::fs;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 struct RootElementInfo {
@@ -14,81 +14,142 @@ struct RootElementInfo {
     attributes: std::collections::HashMap<String, String>,
 }
 
-pub async fn process_osm_import(import_type: &str, import_scope: &str, import_dir: &str) -> Result<()> {
+pub enum OsmFileType {
+    Full(String),
+    Delta(String),
+}
+
+pub struct ImportOptions {
+    pub osm_file_type: OsmFileType,
+    pub base_path: String,
+}
+impl ImportOptions {
+    fn get_import_type(&self) -> &str {
+        match &self.osm_file_type {
+            OsmFileType::Full(_) => "full",
+            OsmFileType::Delta(_) => "delta",
+        }
+    }
+    fn get_import_scope(&self) -> String {
+        match &self.osm_file_type {
+            OsmFileType::Full(date) => date.clone(),
+            OsmFileType::Delta(abc) => abc.replace("/", "_"),
+        }
+    }
+    fn get_import_dir(&self) -> String {
+        format!(
+            "./data/{}/{}",
+            self.get_import_type(),
+            self.get_import_scope()
+        )
+    }
+
+    fn get_filename_base(&self) -> String {
+        match &self.osm_file_type {
+            OsmFileType::Full(date) => format!("{}.osm", self.get_import_scope()),
+            OsmFileType::Delta(abc) => format!("{}.osc", self.get_import_scope()),
+        }
+    }
+
+    pub fn get_lock_file(&self) -> String {
+        format!("{}/lock", self.get_import_dir())
+    }
+
+    pub fn get_batch_file(&self, element_type: &str, batch_number: usize) -> String {
+        format!(
+            "{}/batches/{}/{}.batch_{:06}.xml",
+            self.get_import_dir(),
+            element_type,
+            self.get_filename_base(),
+            batch_number
+        )
+    }
+
+    pub fn get_batches_complete_file(&self, element_type: &str) -> String {
+        format!(
+            "{}/batches/{}/{}.batches_complete",
+            self.get_import_dir(),
+            element_type,
+            self.get_filename_base(),
+        )
+    }
+}
+
+pub async fn process_osm_import(import_options: &ImportOptions) -> Result<()> {
     info!("🔧 Starting OSM import processing");
-    info!("   Type: {}", import_type);
-    info!("   Scope: {}", import_scope);
-    info!("   Directory: {}", import_dir);
-    
+
     // Validate input
     let date_regex = Regex::new(r"^[0-9]{6}$")?;
     let abc_regex = Regex::new(r"^[0-9]{3}/[0-9]{3}/[0-9]{3}$")?;
-    
+
     info!("✅ Validating input parameters...");
-    match import_type {
-        "full" => {
-            if !date_regex.is_match(import_scope) {
+    let import_scope = import_options.get_import_scope();
+    match import_options.osm_file_type {
+        OsmFileType::Full(_) => {
+            if !date_regex.is_match(&import_scope) {
                 error!("❌ Invalid date format: {} (expected ddmmyy)", import_scope);
                 anyhow::bail!("Invalid date format: {} (expected ddmmyy)", import_scope);
             }
             info!("✅ Date format validated: {}", import_scope);
         }
-        "delta" => {
-            if !abc_regex.is_match(import_scope) {
-                error!("❌ Invalid ABC format: {} (expected AAA/BBB/CCC)", import_scope);
-                anyhow::bail!("Invalid ABC format: {} (expected AAA/BBB/CCC)", import_scope);
+        OsmFileType::Delta(_) => {
+            if !abc_regex.is_match(&import_scope) {
+                error!(
+                    "❌ Invalid ABC format: {} (expected AAA/BBB/CCC)",
+                    import_scope
+                );
+                anyhow::bail!(
+                    "Invalid ABC format: {} (expected AAA/BBB/CCC)",
+                    import_scope
+                );
             }
             info!("✅ ABC format validated: {}", import_scope);
         }
-        _ => {
-            error!("❌ Invalid import type: {}", import_type);
-            anyhow::bail!("Invalid import type: {}", import_type);
-        }
     }
 
-    // Create directories
+    let import_dir = import_options.get_import_dir();
+
     info!("📁 Creating directories: {}", import_dir);
-    fs::create_dir_all(import_dir).await?;
+
+    fs::create_dir_all(&import_dir).await?;
     info!("✅ Directories created successfully");
-    
+
     // Create lock file
     let lock_file_path = format!("{}/lock", import_dir);
     info!("🔒 Creating lock file: {}", lock_file_path);
     fs::write(&lock_file_path, "locked").await?;
     info!("✅ Lock file created successfully");
-    
-    info!("🚀 Starting {} import processing...", import_type);
-    let result = match import_type {
-        "full" => process_full_import(import_scope, import_dir).await,
-        "delta" => process_delta_import(import_scope, import_dir).await,
-        _ => unreachable!(),
+
+    let result = match import_options.osm_file_type {
+        OsmFileType::Full(_) => process_full_import(&import_scope, &import_dir).await,
+        OsmFileType::Delta(_) => process_delta_import(&import_scope, &import_dir).await,
     };
-    
+
     // Clean up lock file
     info!("🧹 Cleaning up lock file: {}", lock_file_path);
     match fs::remove_file(&lock_file_path).await {
         Ok(_) => info!("✅ Lock file removed successfully"),
         Err(e) => warn!("⚠️ Failed to remove lock file: {}", e),
     }
-    
+
     result
 }
 
 async fn process_full_import(date: &str, import_dir: &str) -> Result<()> {
     info!("📅 Processing full import for date: {}", date);
-    
+
     let osm_pbf_file = format!("{}/{}.osm.pbf", import_dir, date);
     let osm_xml_file = format!("{}/{}.osm", import_dir, date);
-    
+
     info!("📝 File paths:");
     info!("   PBF file: {}", osm_pbf_file);
     info!("   XML file: {}", osm_xml_file);
-    
+
     // Download OSM PBF file
     info!("⬇️ Downloading OSM PBF file...");
     download_osm_pbf(date, &osm_pbf_file).await?;
     info!("✅ Downloaded PBF file: {}", osm_pbf_file);
-    
+
     // Convert PBF to XML using osmium (matching Python implementation)
     info!("🔄 Converting PBF to XML...");
     if !Path::new(&osm_xml_file).exists() {
@@ -96,41 +157,41 @@ async fn process_full_import(date: &str, import_dir: &str) -> Result<()> {
     } else {
         info!("✅ XML file already exists: {}", osm_xml_file);
     }
-    
+
     // Process XML and create batches
     info!("🔄 Starting XML batching process...");
     batch_osm_xml(&osm_xml_file, import_dir, "full", 500).await?;
     info!("🎉 Completed batching for {}", osm_xml_file);
-    
+
     Ok(())
 }
 
 async fn process_delta_import(abc: &str, import_dir: &str) -> Result<()> {
     info!("🔄 Processing delta import for: {}", abc);
-    
+
     let a_b_c = abc.replace("/", "_");
     let osc_gz_file = format!("{}/{}.osc.gz", import_dir, a_b_c);
     let osc_file = format!("{}/{}.osc", import_dir, a_b_c);
-    
+
     info!("📝 File paths:");
     info!("   OSC.GZ file: {}", osc_gz_file);
     info!("   OSC file: {}", osc_file);
-    
+
     // Download delta OSC.GZ file
     info!("⬇️ Downloading delta OSC.GZ file...");
     download_osc_gz(abc, &osc_gz_file).await?;
     info!("✅ Downloaded: {}", osc_gz_file);
-    
+
     // Decompress OSC.GZ file
     info!("📦 Decompressing OSC.GZ file...");
     decompress_gz(&osc_gz_file, &osc_file).await?;
     info!("✅ Decompressed {} to {}", osc_gz_file, osc_file);
-    
+
     // Process XML and create batches
     info!("🔄 Starting OSC XML batching process...");
     batch_osm_xml(&osc_file, import_dir, "delta", 1000).await?;
     info!("🎉 Completed batching for {}", osc_file);
-    
+
     Ok(())
 }
 
@@ -139,8 +200,11 @@ async fn download_osm_pbf(date: &str, output_path: &str) -> Result<()> {
         info!("File already exists: {}", output_path);
         return Ok(());
     }
-    
-    let url = format!("https://download.geofabrik.de/asia/bangladesh-{}.osm.pbf", date);
+
+    let url = format!(
+        "https://download.geofabrik.de/asia/bangladesh-{}.osm.pbf",
+        date
+    );
     download_file(&url, output_path).await
 }
 
@@ -149,27 +213,30 @@ async fn download_osc_gz(abc: &str, output_path: &str) -> Result<()> {
         info!("File already exists: {}", output_path);
         return Ok(());
     }
-    
-    let url = format!("https://download.geofabrik.de/asia/bangladesh-updates/{}.osc.gz", abc);
+
+    let url = format!(
+        "https://download.geofabrik.de/asia/bangladesh-updates/{}.osc.gz",
+        abc
+    );
     download_file(&url, output_path).await
 }
 
 async fn download_file(url: &str, output_path: &str) -> Result<()> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
-    
+
     info!("Starting download: {} -> {}", url, output_path);
-    
+
     // Create parent directories
     if let Some(parent) = Path::new(output_path).parent() {
         fs::create_dir_all(parent).await?;
     }
-    
+
     let response = reqwest::get(url).await?;
     if !response.status().is_success() {
         anyhow::bail!("Download failed with status: {}", response.status());
     }
-    
+
     // Get file size if available
     let total_size = response.content_length();
     if let Some(size) = total_size {
@@ -177,37 +244,43 @@ async fn download_file(url: &str, output_path: &str) -> Result<()> {
     } else {
         info!("File size: unknown");
     }
-    
+
     let mut file = tokio::fs::File::create(output_path).await?;
     let mut stream = response.bytes_stream();
     let mut downloaded = 0u64;
     let mut last_log_time = std::time::Instant::now();
-    
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         let chunk_size = chunk.len() as u64;
-        
+
         file.write_all(&chunk).await?;
         downloaded += chunk_size;
-        
+
         // Log progress every 5 seconds or every 10MB
         let now = std::time::Instant::now();
         if now.duration_since(last_log_time).as_secs() >= 5 || downloaded % (10 * 1_048_576) == 0 {
             if let Some(total) = total_size {
                 let percentage = (downloaded as f64 / total as f64) * 100.0;
-                info!("Download progress: {:.1}% ({:.2}/{:.2} MB)", 
-                    percentage, 
-                    downloaded as f64 / 1_048_576.0, 
-                    total as f64 / 1_048_576.0);
+                info!(
+                    "Download progress: {:.1}% ({:.2}/{:.2} MB)",
+                    percentage,
+                    downloaded as f64 / 1_048_576.0,
+                    total as f64 / 1_048_576.0
+                );
             } else {
                 info!("Downloaded: {:.2} MB", downloaded as f64 / 1_048_576.0);
             }
             last_log_time = now;
         }
     }
-    
+
     file.flush().await?;
-    info!("Download completed: {} ({:.2} MB)", output_path, downloaded as f64 / 1_048_576.0);
+    info!(
+        "Download completed: {} ({:.2} MB)",
+        output_path,
+        downloaded as f64 / 1_048_576.0
+    );
     Ok(())
 }
 
@@ -216,16 +289,16 @@ async fn decompress_gz(input_path: &str, output_path: &str) -> Result<()> {
         info!("Decompressed file already exists: {}", output_path);
         return Ok(());
     }
-    
+
     info!("Decompressing {} to {}", input_path, output_path);
-    
+
     let gz_data = fs::read(input_path).await?;
     let mut decoder = GzDecoder::new(&gz_data[..]);
     let mut decompressed = Vec::new();
-    
+
     use std::io::Read;
     decoder.read_to_end(&mut decompressed)?;
-    
+
     fs::write(output_path, decompressed).await?;
     info!("Successfully decompressed: {}", output_path);
     Ok(())
@@ -233,26 +306,38 @@ async fn decompress_gz(input_path: &str, output_path: &str) -> Result<()> {
 
 async fn convert_pbf_to_xml(pbf_file: &str, xml_file: &str) -> Result<()> {
     info!("🔄 Converting PBF to XML: {} -> {}", pbf_file, xml_file);
-    
+
     // Check if PBF file exists and has reasonable size
     let pbf_metadata = fs::metadata(pbf_file).await?;
     let file_size_mb = pbf_metadata.len() as f64 / 1_048_576.0;
     info!("📊 PBF file size: {:.2} MB", file_size_mb);
-    
+
     if pbf_metadata.len() < 1000 {
-        error!("❌ PBF file is suspiciously small ({} bytes) - likely a 404 error page", pbf_metadata.len());
+        error!(
+            "❌ PBF file is suspiciously small ({} bytes) - likely a 404 error page",
+            pbf_metadata.len()
+        );
         anyhow::bail!("Downloaded PBF file appears to be invalid (too small)");
     }
-    
+
     // Use osmium-tool to convert PBF to XML (matching Python implementation)
     let xml_temp_file = format!("{}.temp", xml_file);
     info!("🔍 Running osmium cat conversion...");
-    
+
     let osmium_result = tokio::process::Command::new("osmium")
-        .args(&["cat", pbf_file, "-F", "osm.pbf", "-o", &xml_temp_file, "-f", "osm"])
+        .args(&[
+            "cat",
+            pbf_file,
+            "-F",
+            "osm.pbf",
+            "-o",
+            &xml_temp_file,
+            "-f",
+            "osm",
+        ])
         .output()
         .await;
-    
+
     match osmium_result {
         Ok(output) if output.status.success() => {
             info!("✅ Successfully converted PBF to XML using osmium-tool");
@@ -262,10 +347,13 @@ async fn convert_pbf_to_xml(pbf_file: &str, xml_file: &str) -> Result<()> {
             return Ok(());
         }
         Ok(output) => {
-            error!("❌ osmium-tool failed with exit code: {:?}", output.status.code());
+            error!(
+                "❌ osmium-tool failed with exit code: {:?}",
+                output.status.code()
+            );
             error!("❌ stderr: {}", String::from_utf8_lossy(&output.stderr));
             error!("❌ stdout: {}", String::from_utf8_lossy(&output.stdout));
-            
+
             // Clean up temp file if it exists
             if Path::new(&xml_temp_file).exists() {
                 let _ = fs::remove_file(&xml_temp_file).await;
@@ -275,43 +363,54 @@ async fn convert_pbf_to_xml(pbf_file: &str, xml_file: &str) -> Result<()> {
             error!("❌ osmium-tool not available or failed to execute: {}", e);
         }
     }
-    
+
     anyhow::bail!("PBF to XML conversion failed. Please install osmium-tool: 'sudo apt-get install osmium-tool' or similar for your OS.");
 }
 
-async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, elements_per_batch: usize) -> Result<()> {
+async fn batch_osm_xml(
+    input_file: &str,
+    import_dir: &str,
+    import_type: &str,
+    elements_per_batch: usize,
+) -> Result<()> {
     info!("🧩 Starting XML batching process");
     info!("   Input file: {}", input_file);
     info!("   Import dir: {}", import_dir);
     info!("   Import type: {}", import_type);
     info!("   Elements per batch: {}", elements_per_batch);
-    
+
     let batches_dir = format!("{}/batches", import_dir);
     let input_filename = Path::new(input_file).file_name().unwrap().to_str().unwrap();
-    
+
     // Check if all element types are already complete
     let mut all_complete = true;
     for element_type in &["node", "way", "relation"] {
-        let complete_file = format!("{}/{}/{}.batches_complete", batches_dir, element_type, input_filename);
+        let complete_file = format!(
+            "{}/{}/{}.batches_complete",
+            batches_dir, element_type, input_filename
+        );
         if !Path::new(&complete_file).exists() {
             all_complete = false;
             break;
         }
     }
-    
+
     if all_complete {
         info!("✅ All batches are already complete - skipping processing");
         return Ok(());
     }
-    
-    info!("🗑️ Clearing existing incomplete batches directory: {}", batches_dir);
+
+    info!(
+        "🗑️ Clearing existing incomplete batches directory: {}",
+        batches_dir
+    );
     if Path::new(&batches_dir).exists() {
         fs::remove_dir_all(&batches_dir).await?;
         info!("✅ Removed existing batches directory");
     } else {
         info!("ℹ️ No existing batches directory found");
     }
-    
+
     // Create batch directories
     info!("📁 Creating batch directories...");
     fs::create_dir_all(&batches_dir).await?;
@@ -321,57 +420,65 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
         info!("   Created: {}", dir_path);
     }
     info!("✅ Batch directories created");
-    
+
     info!("📖 Reading XML file: {}", input_file);
     let xml_content = fs::read_to_string(input_file).await?;
-    info!("✅ XML file loaded ({:.2} MB)", xml_content.len() as f64 / 1_048_576.0);
-    
+    info!(
+        "✅ XML file loaded ({:.2} MB)",
+        xml_content.len() as f64 / 1_048_576.0
+    );
+
     info!("⚙️ Initializing XML parser...");
     let mut reader = Reader::from_str(&xml_content);
     reader.config_mut().trim_text(true);
     info!("✅ XML parser initialized");
-    
+
     // Parse root element attributes first
     let root_element_info = parse_root_element(&xml_content)?;
-    info!("📋 Root element: {} with {} attributes", root_element_info.tag, root_element_info.attributes.len());
-    
+    info!(
+        "📋 Root element: {} with {} attributes",
+        root_element_info.tag,
+        root_element_info.attributes.len()
+    );
+
     let mut batch_counts = std::collections::HashMap::new();
-    let mut current_batches: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    
+    let mut current_batches: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     // Initialize
     info!("🔧 Initializing parsing state...");
     for element_type in &["node", "way", "relation"] {
         batch_counts.insert(element_type.to_string(), 0);
         current_batches.insert(element_type.to_string(), Vec::new());
     }
-    
+
     let mut buf = Vec::new();
     let mut current_element = String::new();
     let mut element_type = String::new();
     let mut in_element = false;
-    let mut element_depth = 0;  // Track nesting depth within an element
+    let mut element_depth = 0; // Track nesting depth within an element
     let mut delta_container = String::new();
     let mut total_elements_processed = 0;
     let mut last_log_time = std::time::Instant::now();
-    
+
     info!("🚀 Starting XML parsing...");
-    
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let tag_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                
+
                 match tag_name.as_str() {
                     "node" | "way" | "relation" => {
                         element_type = tag_name.to_string();
                         in_element = true;
                         element_depth = 1;
                         current_element.clear();
-                        
+
                         if import_type == "delta" && !delta_container.is_empty() {
                             current_element.push_str(&format!("<{}>\n", delta_container));
                         }
-                        
+
                         // Build start tag with all attributes
                         current_element.push_str(&format!("<{}", tag_name));
                         for attr in e.attributes() {
@@ -386,7 +493,7 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                                 .replace(">", "&gt;");
                             current_element.push_str(&format!(" {}=\"{}\"", key, escaped_value));
                         }
-                        
+
                         current_element.push_str(">");
                     }
                     "create" | "modify" | "delete" if import_type == "delta" => {
@@ -395,7 +502,7 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                     _ => {
                         if in_element {
                             element_depth += 1;
-                            
+
                             // Handle nested elements (nd, tag, member, etc.)
                             current_element.push_str(&format!("<{}", tag_name));
                             for attr in e.attributes() {
@@ -408,7 +515,8 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                                     .replace("\"", "&quot;")
                                     .replace("<", "&lt;")
                                     .replace(">", "&gt;");
-                                current_element.push_str(&format!(" {}=\"{}\"", key, escaped_value));
+                                current_element
+                                    .push_str(&format!(" {}=\"{}\"", key, escaped_value));
                             }
                             current_element.push_str(">");
                         }
@@ -417,22 +525,27 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
             }
             Ok(Event::End(ref e)) => {
                 let tag_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                
+
                 match tag_name.as_str() {
                     "node" | "way" | "relation" => {
                         if in_element && element_depth == 1 {
                             current_element.push_str(&format!("</{}>", tag_name));
-                            
+
                             if import_type == "delta" && !delta_container.is_empty() {
                                 current_element.push_str(&format!("\n</{}>", delta_container));
                             }
-                            
-                            current_batches.get_mut(&element_type).unwrap().push(current_element.clone());
+
+                            current_batches
+                                .get_mut(&element_type)
+                                .unwrap()
+                                .push(current_element.clone());
                             total_elements_processed += 1;
-                            
+
                             // Log progress every 10,000 elements or every 10 seconds
                             let now = std::time::Instant::now();
-                            if total_elements_processed % 10000 == 0 || now.duration_since(last_log_time).as_secs() >= 10 {
+                            if total_elements_processed % 10000 == 0
+                                || now.duration_since(last_log_time).as_secs() >= 10
+                            {
                                 info!("📊 Progress: {} elements processed (nodes: {}, ways: {}, relations: {})", 
                                     total_elements_processed,
                                     current_batches["node"].len() + batch_counts["node"] * elements_per_batch,
@@ -440,15 +553,23 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                                     current_batches["relation"].len() + batch_counts["relation"] * elements_per_batch);
                                 last_log_time = now;
                             }
-                            
+
                             // Check if batch is full
                             if current_batches[&element_type].len() >= elements_per_batch {
-                                write_batch(&element_type, &current_batches[&element_type], 
-                                          batch_counts[&element_type], import_dir, input_file, import_type, &root_element_info).await?;
+                                write_batch(
+                                    &element_type,
+                                    &current_batches[&element_type],
+                                    batch_counts[&element_type],
+                                    import_dir,
+                                    input_file,
+                                    import_type,
+                                    &root_element_info,
+                                )
+                                .await?;
                                 *batch_counts.get_mut(&element_type).unwrap() += 1;
                                 current_batches.get_mut(&element_type).unwrap().clear();
                             }
-                            
+
                             in_element = false;
                             element_depth = 0;
                         } else if in_element {
@@ -470,17 +591,17 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
             }
             Ok(Event::Empty(ref e)) => {
                 let tag_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                
+
                 match tag_name.as_str() {
                     "node" | "way" | "relation" => {
                         // Handle self-closing elements (primarily nodes)
                         element_type = tag_name.to_string();
                         current_element.clear();
-                        
+
                         if import_type == "delta" && !delta_container.is_empty() {
                             current_element.push_str(&format!("<{}>\n", delta_container));
                         }
-                        
+
                         // Build self-closing element with all attributes
                         current_element.push_str(&format!("<{}", tag_name));
                         for attr in e.attributes() {
@@ -496,18 +617,23 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                             current_element.push_str(&format!(" {}=\"{}\"", key, escaped_value));
                         }
                         current_element.push_str("/>");
-                        
+
                         if import_type == "delta" && !delta_container.is_empty() {
                             current_element.push_str(&format!("\n</{}>", delta_container));
                         }
-                        
+
                         // Add to batch (same logic as Event::End)
-                        current_batches.get_mut(&element_type).unwrap().push(current_element.clone());
+                        current_batches
+                            .get_mut(&element_type)
+                            .unwrap()
+                            .push(current_element.clone());
                         total_elements_processed += 1;
-                        
+
                         // Log progress every 10,000 elements or every 10 seconds
                         let now = std::time::Instant::now();
-                        if total_elements_processed % 10000 == 0 || now.duration_since(last_log_time).as_secs() >= 10 {
+                        if total_elements_processed % 10000 == 0
+                            || now.duration_since(last_log_time).as_secs() >= 10
+                        {
                             info!("📊 Progress: {} elements processed (nodes: {}, ways: {}, relations: {})", 
                                 total_elements_processed,
                                 current_batches["node"].len() + batch_counts["node"] * elements_per_batch,
@@ -515,11 +641,19 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                                 current_batches["relation"].len() + batch_counts["relation"] * elements_per_batch);
                             last_log_time = now;
                         }
-                        
+
                         // Check if batch is full
                         if current_batches[&element_type].len() >= elements_per_batch {
-                            write_batch(&element_type, &current_batches[&element_type], 
-                                      batch_counts[&element_type], import_dir, input_file, import_type, &root_element_info).await?;
+                            write_batch(
+                                &element_type,
+                                &current_batches[&element_type],
+                                batch_counts[&element_type],
+                                import_dir,
+                                input_file,
+                                import_type,
+                                &root_element_info,
+                            )
+                            .await?;
                             *batch_counts.get_mut(&element_type).unwrap() += 1;
                             current_batches.get_mut(&element_type).unwrap().clear();
                         }
@@ -538,7 +672,8 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
                                     .replace("\"", "&quot;")
                                     .replace("<", "&lt;")
                                     .replace(">", "&gt;");
-                                current_element.push_str(&format!(" {}=\"{}\"", key, escaped_value));
+                                current_element
+                                    .push_str(&format!(" {}=\"{}\"", key, escaped_value));
                             }
                             current_element.push_str("/>");
                         }
@@ -569,50 +704,80 @@ async fn batch_osm_xml(input_file: &str, import_dir: &str, import_type: &str, el
         }
         buf.clear();
     }
-    
+
     info!("🏁 Parsing completed! Writing remaining elements and finalization...");
-    
+
     // Write remaining elements
     for element_type in &["node", "way", "relation"] {
         let element_key = element_type.to_string();
         if !current_batches[&element_key].is_empty() {
-            info!("💾 Writing final batch for {}: {} elements", element_type, current_batches[&element_key].len());
-            write_batch(element_type, &current_batches[&element_key], 
-                      batch_counts[&element_key], import_dir, input_file, import_type, &root_element_info).await?;
+            info!(
+                "💾 Writing final batch for {}: {} elements",
+                element_type,
+                current_batches[&element_key].len()
+            );
+            write_batch(
+                element_type,
+                &current_batches[&element_key],
+                batch_counts[&element_key],
+                import_dir,
+                input_file,
+                import_type,
+                &root_element_info,
+            )
+            .await?;
             *batch_counts.get_mut(&element_key).unwrap() += 1;
         }
-        
+
         // Write completion marker
         let input_filename = Path::new(input_file).file_name().unwrap().to_str().unwrap();
-        let completion_file = format!("{}/batches/{}/{}.batches_complete", 
-                                    import_dir, element_type, input_filename);
-        let completion_message = format!("wrote {} batches from {}\n", batch_counts[&element_key], input_filename);
+        let completion_file = format!(
+            "{}/batches/{}/{}.batches_complete",
+            import_dir, element_type, input_filename
+        );
+        let completion_message = format!(
+            "wrote {} batches from {}\n",
+            batch_counts[&element_key], input_filename
+        );
         fs::write(&completion_file, &completion_message).await?;
-        info!("✅ {}: {} batches written", element_type, batch_counts[&element_key]);
+        info!(
+            "✅ {}: {} batches written",
+            element_type, batch_counts[&element_key]
+        );
     }
-    
+
     info!("🎉 XML batching completed successfully!");
     info!("📊 Final statistics:");
     for element_type in &["node", "way", "relation"] {
         let element_key = element_type.to_string();
-        info!("   {}: {} batches", element_type, batch_counts[&element_key]);
+        info!(
+            "   {}: {} batches",
+            element_type, batch_counts[&element_key]
+        );
     }
     info!("   Total elements processed: {}", total_elements_processed);
-    
+
     Ok(())
 }
 
-async fn write_batch(element_type: &str, elements: &[String], batch_number: usize, 
-                    import_dir: &str, input_file: &str, _import_type: &str, root_info: &RootElementInfo) -> Result<()> {
+async fn write_batch(
+    element_type: &str,
+    elements: &[String],
+    batch_number: usize,
+    import_dir: &str,
+    input_file: &str,
+    _import_type: &str,
+    root_info: &RootElementInfo,
+) -> Result<()> {
     let input_filename = Path::new(input_file).file_name().unwrap().to_str().unwrap();
     let extension = ".xml";
     let batch_filename = format!("{}.batch_{:06}{}", input_filename, batch_number, extension);
     let batch_path = format!("{}/batches/{}/{}", import_dir, element_type, batch_filename);
     let temp_path = format!("{}.temp", batch_path);
-    
+
     let mut content = String::new();
     content.push_str("<?xml version='1.0' encoding='UTF-8'?>\n");
-    
+
     // Build root element with preserved attributes
     content.push_str(&format!("<{}", root_info.tag));
     for (key, value) in &root_info.attributes {
@@ -624,22 +789,22 @@ async fn write_batch(element_type: &str, elements: &[String], batch_number: usiz
         content.push_str(&format!(" {}=\"{}\"", key, escaped_value));
     }
     content.push_str(">\n");
-    
+
     // Add elements
     for element in elements {
         content.push_str(element);
         content.push('\n');
     }
-    
+
     // Close root element
     content.push_str(&format!("</{}>\n", root_info.tag));
-    
+
     // Write to temp file first
     fs::write(&temp_path, content).await?;
-    
+
     // Move to final location
     fs::rename(&temp_path, &batch_path).await?;
-    
+
     Ok(())
 }
 
@@ -647,28 +812,31 @@ fn parse_root_element(xml_content: &str) -> Result<RootElementInfo> {
     let mut reader = Reader::from_str(xml_content);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    
+
     // Find the root element (osm or osmChange)
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let tag_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                
+
                 if tag_name == "osm" || tag_name == "osmChange" {
                     let mut attributes = std::collections::HashMap::new();
-                    
+
                     for attr in e.attributes() {
                         let attr = attr?;
                         let key = std::str::from_utf8(attr.key.as_ref())?.to_string();
                         let value = std::str::from_utf8(&attr.value)?.to_string();
                         attributes.insert(key, value);
                     }
-                    
+
                     // Add/update generator attribute to include Rust implementation info
-                    let current_generator = attributes.get("generator").cloned().unwrap_or_default();
-                    attributes.insert("generator".to_string(), 
-                        format!("Chaldal osm-import-rust; {}", current_generator));
-                    
+                    let current_generator =
+                        attributes.get("generator").cloned().unwrap_or_default();
+                    attributes.insert(
+                        "generator".to_string(),
+                        format!("Chaldal osm-import-rust; {}", current_generator),
+                    );
+
                     return Ok(RootElementInfo {
                         tag: tag_name,
                         attributes,
@@ -681,6 +849,6 @@ fn parse_root_element(xml_content: &str) -> Result<RootElementInfo> {
         }
         buf.clear();
     }
-    
+
     anyhow::bail!("Could not find root element (osm or osmChange)")
 }
