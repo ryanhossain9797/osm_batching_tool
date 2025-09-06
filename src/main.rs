@@ -2,8 +2,7 @@ use std::env;
 use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error};
-
-mod osm_processor;
+use osm_import_rust;
 
 // Include generated protobuf code
 pub mod osm_import {
@@ -128,7 +127,7 @@ impl OsmImport for OSMImportService {
             
             tokio::spawn(async move {
                 info!("🎯 Background task started for {} {}", import_type_clone, import_scope_clone);
-                if let Err(e) = osm_processor::process_osm_import(&import_type_clone, &import_scope_clone, &import_dir_clone).await {
+                if let Err(e) = osm_import_rust::process_osm_import(&import_type_clone, &import_scope_clone, &import_dir_clone).await {
                     error!("💥 Background processing failed for {} {}: {}", import_type_clone, import_scope_clone, e);
                 } else {
                     info!("🎉 Background processing completed successfully for {} {}", import_type_clone, import_scope_clone);

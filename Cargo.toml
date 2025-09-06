@@ -3,6 +3,14 @@ name = "osm-import-rust"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "osm_import_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "osm-import-rust"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1.47", features = ["full"] }
 tonic = "0.14"
