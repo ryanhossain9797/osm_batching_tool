@@ -53,17 +53,13 @@ osm_batching_tool/
 ### Full Import (Historical Data)
 ```bash
 # Request batch 0 of nodes from Bangladesh data for September 1, 2025
-grpcurl -plaintext -proto proto/osm_import.proto \
-    -d '{"batch_number": 0, "full_date": "250901", "element_type": "node"}' \
-    localhost:8080 osm_import.OSMImport/FetchImportBatch
+grpcurl -plaintext -proto proto/osm_import.proto -d '{"batch_number": 0, "full_date": "250901", "element_type": "node"}' localhost:8080 osm_import.OSMImport/FetchImportBatch
 ```
 
 ### Delta Import (Updates)
 ```bash
 # Request batch 0 of ways from delta update 000/000/001
-grpcurl -plaintext -proto proto/osm_import.proto \
-    -d '{"batch_number": 0, "delta_abc": "000/000/001", "element_type": "way"}' \
-    localhost:8080 osm_import.OSMImport/FetchImportBatch
+grpcurl -plaintext -proto proto/osm_import.proto -d '{"batch_number": 0, "delta_abc": "000/000/001", "element_type": "way"}' localhost:8080 osm_import.OSMImport/FetchImportBatch
 ```
 
 ## Data Flow
@@ -100,7 +96,57 @@ The service organizes data in this structure:
 
 ## Dependencies
 
-**Core Dependencies:**
+### System Requirements
+
+**Required for Running:**
+
+1. **osmium-tool** - Required for PBF to XML conversion at runtime
+   ```bash
+   # Windows (Conda - Recommended)
+   conda install conda-forge::osmium-tool
+   
+   # Linux/Ubuntu
+   sudo apt-get install osmium-tool
+   
+   # macOS
+   brew install osmium-tool
+   ```
+   
+   For detailed installation instructions and other platforms, see: https://osmcode.org/osmium-tool/
+
+**Required for Building:**
+
+2. **protoc** - Protocol Buffer compiler (needed to compile the project)
+   ```bash
+   # Windows
+   # Download from: https://github.com/protocolbuffers/protobuf/releases
+   # Or install via chocolatey: choco install protoc
+   
+   # Linux/Ubuntu
+   sudo apt-get install protobuf-compiler
+   
+   # macOS
+   brew install protobuf
+   ```
+
+**For Testing/Development:**
+
+3. **grpcurl** - Command-line gRPC client (for testing the API)
+   ```bash
+   # Windows
+   # Download from: https://github.com/fullstorydev/grpcurl/releases
+   # Or install via chocolatey: choco install grpcurl
+   
+   # Linux/Ubuntu
+   sudo apt-get install grpcurl
+   
+   # macOS
+   brew install grpcurl
+   ```
+
+### Rust Dependencies
+
+**Core Dependencies (handled by Cargo):**
 - `tokio`: Async runtime for concurrent operations
 - `tonic`: gRPC framework for service implementation
 - `prost`: Protocol Buffer implementation
@@ -109,9 +155,6 @@ The service organizes data in this structure:
 - `flate2`: GZ decompression for delta files
 - `anyhow`: Error handling
 - `tracing`: Structured logging
-
-**External Tools:**
-- `osmium-tool`: Required for PBF to XML conversion (install via package manager)
 
 ## Building and Running
 
