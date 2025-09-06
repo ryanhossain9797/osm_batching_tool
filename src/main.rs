@@ -1,8 +1,8 @@
+use osm_import_rust;
 use std::env;
 use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{info, error};
-use osm_import_rust;
+use tracing::{error, info};
 
 // Include generated protobuf code
 pub mod osm_import {
@@ -11,11 +11,75 @@ pub mod osm_import {
 
 use osm_import::osm_import_server::{OsmImport, OsmImportServer};
 use osm_import::{
-    PingRequest, PingResponse, FetchImportBatchRequest, FetchImportBatchResponse,
-    fetch_import_batch_request::ImportType,
-    fetch_import_batch_response::Response as BatchResponse,
+    fetch_import_batch_request::ImportType, fetch_import_batch_response::Response as BatchResponse,
+    FetchImportBatchRequest, FetchImportBatchResponse, PingRequest, PingResponse,
 };
 
+fn get_import_details(
+    import_type: Option<ImportType>,
+) -> Result<(&'static str, String, String, &'static str), String> {
+    match import_type {
+        Some(ImportType::FullDate(date)) => {
+            if !date.chars().all(|c| c.is_ascii_digit()) || date.len() != 6 {
+                Err("date arg invalid (expected ddmmyy)".to_string())
+            } else {
+                Ok(("full", date.clone(), date.clone(), ".osm"))
+            }
+        }
+        Some(ImportType::DeltaAbc(abc)) => {
+            if abc.matches('/').count() != 2 || !abc.chars().all(|c| c.is_ascii_digit() || c == '/')
+            {
+                Err("abc arg invalid (expected AAA/BBB/CCC)".to_string())
+            } else {
+                Ok(("delta", abc.clone(), abc.replace("/", "_"), ".osc"))
+            }
+        }
+        None => Err("import type is unknown".to_string()),
+    }
+}
+
+async fn try_get_batch_file(batch_file: &str) -> Option<Result<String, String>> {
+    match (
+        Path::new(&batch_file).exists(),
+        tokio::fs::read_to_string(&batch_file).await,
+    ) {
+        (true, Ok(content)) => {
+            info!("✅ Successfully read batch file ({} bytes)", content.len());
+            Some(Ok(content))
+        }
+        (true, Err(e)) => {
+            error!("❌ Batch file Exists but failed to read: {e}");
+            Some(Err("Failed to read batch file".to_string()))
+        }
+        (false, _) => {
+            info!("⚠️ Batch file does not exist {batch_file}");
+            None
+        }
+    }
+}
+
+async fn maybe_start_background_processing(
+    import_type: &'static str,
+    import_scope: String,
+    import_dir: String,
+) {
+    let import_lock_file = format!("{import_dir}/lock");
+    if !Path::new(&import_lock_file).exists() {
+        info!("🚀 No lock file found - starting background processing for {import_type} {import_scope}");
+        tokio::spawn(async move {
+            info!("🎯 Background task started for {import_type} {import_scope}");
+            if let Err(e) =
+                osm_import_rust::process_osm_import(&import_type, &import_scope, &import_dir).await
+            {
+                error!("💥 Background processing failed for {import_type} {import_scope}: {e}");
+            } else {
+                info!("🎉 Background processing completed successfully for {import_type} {import_scope}");
+            }
+        });
+    } else {
+        info!("🔒 Lock file exists - processing already in progress");
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct OSMImportService;
@@ -33,38 +97,20 @@ impl OsmImport for OSMImportService {
         request: Request<FetchImportBatchRequest>,
     ) -> Result<Response<FetchImportBatchResponse>, Status> {
         let req: FetchImportBatchRequest = request.into_inner();
-        
-        // Parse import type and validate
-        let (import_type, import_scope, import_arg_dir, extension) = match &req.import_type {
-            Some(ImportType::FullDate(date)) => {
-                if !date.chars().all(|c| c.is_ascii_digit()) || date.len() != 6 {
-                    return Ok(Response::new(FetchImportBatchResponse {
-                        response: Some(BatchResponse::Error("date arg invalid (expected ddmmyy)".to_string())),
-                    }));
-                }
-                ("full", date.clone(), date.clone(), ".osm")
-            }
-            Some(ImportType::DeltaAbc(abc)) => {
-                if abc.matches('/').count() != 2 || !abc.chars().all(|c| c.is_ascii_digit() || c == '/') {
-                    return Ok(Response::new(FetchImportBatchResponse {
-                        response: Some(BatchResponse::Error("abc arg invalid (expected AAA/BBB/CCC)".to_string())),
-                    }));
-                }
-                ("delta", abc.clone(), abc.replace("/", "_"), ".osc")
-            }
-            None => {
-                return Ok(Response::new(FetchImportBatchResponse {
-                    response: Some(BatchResponse::Error("import type is unknown".to_string())),
-                }));
-            }
-        };
 
-        info!("📝 Processing request: type={}, scope={}, element_type={}, batch_number={}", 
-            import_type, import_scope, req.element_type, req.batch_number);
+        let (import_type, import_scope, import_arg_dir, import_file_extension) =
+            match get_import_details(req.import_type) {
+                Ok(details) => details,
+                Err(e) => {
+                    return Ok(Response::new(FetchImportBatchResponse {
+                        response: Some(BatchResponse::Error(e)),
+                    }))
+                }
+            };
 
-        let import_dir = format!("./data/bangladesh/{}/{}", import_type, import_arg_dir);
-        let import_lock_file = format!("{}/lock", import_dir);
-        let import_file = format!("{}{}", import_arg_dir, extension);
+        let import_dir = format!("./data/{import_type}/{import_arg_dir}");
+        let import_lock_file = format!("{import_dir}/lock");
+        let import_file = format!("{import_arg_dir}{import_file_extension}");
 
         let batch_file = format!(
             "{}/batches/{}/{}.batch_{:06}.xml",
@@ -76,81 +122,42 @@ impl OsmImport for OSMImportService {
             import_dir, req.element_type, import_file
         );
 
-        info!("📁 File paths configured:");
-        info!("   Import dir: {}", import_dir);
-        info!("   Lock file: {}", import_lock_file);
-        info!("   Batch file: {}", batch_file);
-        info!("   Complete file: {}", batches_complete_file);
+        info!("📁 File paths configured -> import_dir: {import_dir}, import_lock_file: {import_lock_file}, batch_file: {batch_file}, batches_complete_file: {batches_complete_file}");
+        info!("🔍 Checking if batch file exists: {batch_file}");
 
-        // Check if batch file exists
-        info!("🔍 Checking if batch file exists: {}", batch_file);
+        let maybe_existing_file = try_get_batch_file(&batch_file).await;
 
-        if Path::new(&batch_file).exists() {
-            info!("✅ Batch file found, reading content...");
-            match tokio::fs::read_to_string(&batch_file).await {
-                Ok(content) => {
-                    info!("📖 Successfully read batch file ({} bytes)", content.len());
-                    return Ok(Response::new(FetchImportBatchResponse {
-                        response: Some(BatchResponse::BatchContent(content)),
-                    }));
-                }
-                Err(e) => {
-                    error!("❌ Failed to read batch file {}: {}", batch_file, e);
-                    return Ok(Response::new(FetchImportBatchResponse {
-                        response: Some(BatchResponse::Error("Failed to read batch file".to_string())),
-                    }));
-                }
-            }
-        } else {
-            info!("❌ Batch file does not exist");
-        }
-
-        // Check if batches are complete
-        info!("🔍 Checking if batches are complete: {}", batches_complete_file);
-        if Path::new(&batches_complete_file).exists() {
-            info!("✅ Batches are complete!");
-            return Ok(Response::new(FetchImportBatchResponse {
-                response: Some(BatchResponse::BatchesComplete("".to_string())),
-            }));
-        } else {
-            info!("⏳ Batches not yet complete");
-        }
-
-        // If no lock file exists, spawn background processing
-        info!("🔒 Checking for lock file: {}", import_lock_file);
-        if !Path::new(&import_lock_file).exists() {
-            info!("🚀 No lock file found - starting background processing for {} {}", import_type, import_scope);
-            
-            let import_type_clone = import_type.to_string();
-            let import_scope_clone = import_scope.clone();
-            let import_dir_clone = import_dir.clone();
-            
-            tokio::spawn(async move {
-                info!("🎯 Background task started for {} {}", import_type_clone, import_scope_clone);
-                if let Err(e) = osm_import_rust::process_osm_import(&import_type_clone, &import_scope_clone, &import_dir_clone).await {
-                    error!("💥 Background processing failed for {} {}: {}", import_type_clone, import_scope_clone, e);
-                } else {
-                    info!("🎉 Background processing completed successfully for {} {}", import_type_clone, import_scope_clone);
-                }
+        let (should_attempt_import, response) = maybe_existing_file
+            .map(|file_result| {
+                (
+                    false, //regardless of read success, file exists so no need to import
+                    file_result
+                        .map(BatchResponse::BatchContent) //map to batch content if read successfully
+                        .unwrap_or_else(BatchResponse::Error), //map to error if read failed
+                )
+            })
+            .unwrap_or_else(|| match Path::new(&batches_complete_file).exists() {
+                true => (false, BatchResponse::BatchesComplete("".to_string())), //if batches complete file exists, file would never exist so no need to import
+                false => (true, BatchResponse::BatchesPending("".to_string())), //if not complete, we should attempt to get the file, so attempt import
             });
-        } else {
-            info!("🔒 Lock file exists - processing already in progress");
+
+        if should_attempt_import {
+            maybe_start_background_processing(&import_type, import_scope, import_dir).await;
         }
 
         Ok(Response::new(FetchImportBatchResponse {
-            response: Some(BatchResponse::BatchesPending("".to_string())),
+            response: Some(response),
         }))
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::fmt()
-            .with_env_filter(
+        .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -169,5 +176,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-

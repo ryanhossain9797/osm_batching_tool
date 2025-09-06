@@ -10,7 +10,7 @@ scope: ["src/lib.rs", "src/main.rs"]
 ## File Organization
 Data is organized in this structure:
 ```
-./data/bangladesh/{full|delta}/{date|abc}/batches/{type}/
+./data/{full|delta}/{date|abc}/batches/{type}/
 ```
 
 ## Processing Flow

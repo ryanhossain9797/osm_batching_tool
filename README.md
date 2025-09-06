@@ -77,7 +77,7 @@ grpcurl -plaintext -proto proto/osm_import.proto -d '{"batch_number": 0, "delta_
 
 The service organizes data in this structure:
 ```
-./data/bangladesh/
+./data/
 ├── full/
 │   └── 250901/                    # Date-based full import
 │       ├── 250901.osm.pbf         # Downloaded PBF file
