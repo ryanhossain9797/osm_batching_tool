@@ -1,0 +1,37 @@
+---
+description: Data processing patterns and file organization for OSM data
+author: System
+applyTo: Auto Attached
+scope: ["src/lib.rs", "src/main.rs"]
+---
+
+# Data Processing Guidelines
+
+## File Organization
+Data is organized in this structure:
+```
+./data/bangladesh/{full|delta}/{date|abc}/batches/{type}/
+```
+
+## Processing Flow
+- Input: OSM PBF files (full) or OSC.GZ files (delta)
+- Output: XML batches organized by element type (node/way/relation)
+- Batch sizes: 500 elements (full imports), 1000 (delta updates)
+
+## Key Functions
+- `process_osm_import()` - Main orchestration
+- `process_full_import()` - Handle PBF downloads and conversion
+- `process_delta_import()` - Handle OSC.GZ downloads and decompression
+- `batch_osm_xml()` - Core XML parsing and batching logic
+- `download_file()` - Streaming downloads with progress
+
+## Lock File Pattern
+- Create lock files during processing to prevent duplicate work
+- Always clean up lock files in finally blocks
+- Check for existing locks before starting new work
+
+## XML Processing
+- Use `quick-xml` for memory-efficient parsing
+- Process elements in streaming fashion
+- Preserve XML attributes and structure in batches
+- Handle both regular elements and self-closing tags
