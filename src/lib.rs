@@ -8,6 +8,14 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{error, info, warn};
 
+#[derive(Debug)]
+pub enum BatchFileStatus {
+    FileReadSuccessfully(String),
+    FileReadError(String),
+    FileDoesNotExistYet,
+    FileWillNeverExist,
+}
+
 #[derive(Debug, Clone)]
 struct RootElementInfo {
     tag: String,
@@ -46,8 +54,8 @@ impl ImportOptions {
 
     fn get_filename_base(&self) -> String {
         match &self.osm_file_type {
-            OsmFileType::Full(date) => format!("{}.osm", self.get_import_scope()),
-            OsmFileType::Delta(abc) => format!("{}.osc", self.get_import_scope()),
+            OsmFileType::Full(_) => format!("{}.osm", self.get_import_scope()),
+            OsmFileType::Delta(_) => format!("{}.osc", self.get_import_scope()),
         }
     }
 
@@ -72,6 +80,42 @@ impl ImportOptions {
             element_type,
             self.get_filename_base(),
         )
+    }
+}
+
+pub async fn check_batch_file_status(
+    import_options: &ImportOptions,
+    element_type: &str,
+    batch_number: usize,
+) -> BatchFileStatus {
+    let batch_file_path = import_options.get_batch_file(element_type, batch_number);
+    let batches_complete_file_path = import_options.get_batches_complete_file(element_type);
+
+    // First check if the specific batch file exists
+    match (
+        Path::new(&batch_file_path).exists(),
+        tokio::fs::read_to_string(&batch_file_path).await,
+    ) {
+        (true, Ok(content)) => {
+            info!("✅ Successfully read batch file ({} bytes)", content.len());
+            BatchFileStatus::FileReadSuccessfully(content)
+        }
+        (true, Err(e)) => {
+            error!("❌ Batch file exists but failed to read: {e}");
+            BatchFileStatus::FileReadError("Failed to read batch file".to_string())
+        }
+        (false, _) => {
+            info!("⚠️ Batch file does not exist: {batch_file_path}");
+
+            // Check if batches are complete for this element type
+            if Path::new(&batches_complete_file_path).exists() {
+                info!("📋 Batches complete file exists - this batch will never exist");
+                BatchFileStatus::FileWillNeverExist
+            } else {
+                info!("🔄 Batches not complete - should attempt import");
+                BatchFileStatus::FileDoesNotExistYet
+            }
+        }
     }
 }
 

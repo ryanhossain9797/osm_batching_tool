@@ -1,4 +1,4 @@
-use osm_import_rust::{self, ImportOptions, OsmFileType};
+use osm_import_rust::{self, check_batch_file_status, BatchFileStatus, ImportOptions, OsmFileType};
 use std::env;
 use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
@@ -42,26 +42,6 @@ fn get_import_options(import_type: Option<ImportType>) -> Result<ImportOptions, 
     }
 }
 
-async fn try_get_batch_file(batch_file: &str) -> Option<Result<String, String>> {
-    match (
-        Path::new(&batch_file).exists(),
-        tokio::fs::read_to_string(&batch_file).await,
-    ) {
-        (true, Ok(content)) => {
-            info!("✅ Successfully read batch file ({} bytes)", content.len());
-            Some(Ok(content))
-        }
-        (true, Err(e)) => {
-            error!("❌ Batch file Exists but failed to read: {e}");
-            Some(Err("Failed to read batch file".to_string()))
-        }
-        (false, _) => {
-            info!("⚠️ Batch file does not exist {batch_file}");
-            None
-        }
-    }
-}
-
 async fn maybe_start_background_processing(import_options: ImportOptions) {
     let import_lock_file = import_options.get_lock_file();
     if !Path::new(&import_lock_file).exists() {
@@ -101,27 +81,22 @@ impl OsmImport for OSMImportService {
                 response: Some(BatchResponse::Error(e)),
             })),
             Ok(options) => {
-                let batch_file_path =
-                    options.get_batch_file(&req.element_type, req.batch_number as usize);
+                let batch_status =
+                    check_batch_file_status(&options, &req.element_type, req.batch_number as usize)
+                        .await;
 
-                let batches_complete_file_path =
-                    options.get_batches_complete_file(&req.element_type);
-
-                let maybe_existing_file = try_get_batch_file(&batch_file_path).await;
-
-                let (should_attempt_import, response) = maybe_existing_file
-                    .map(|file_result| {
-                        (
-                            false, //regardless of read success, file exists so no need to import
-                            file_result
-                                .map(BatchResponse::BatchContent) //map to batch content if read successfully
-                                .unwrap_or_else(BatchResponse::Error), //map to error if read failed
-                        )
-                    })
-                    .unwrap_or_else(|| match Path::new(&batches_complete_file_path).exists() {
-                        true => (false, BatchResponse::BatchesComplete("".to_string())), //if batches complete file exists, file would never exist so no need to import
-                        false => (true, BatchResponse::BatchesPending("".to_string())), //if not complete, we should attempt to get the file, so attempt import
-                    });
+                let (should_attempt_import, response) = match batch_status {
+                    BatchFileStatus::FileReadSuccessfully(content) => {
+                        (false, BatchResponse::BatchContent(content))
+                    }
+                    BatchFileStatus::FileReadError(error) => (false, BatchResponse::Error(error)),
+                    BatchFileStatus::FileWillNeverExist => {
+                        (false, BatchResponse::BatchesComplete("".to_string()))
+                    }
+                    BatchFileStatus::FileDoesNotExistYet => {
+                        (true, BatchResponse::BatchesPending("".to_string()))
+                    }
+                };
 
                 if should_attempt_import {
                     maybe_start_background_processing(options).await;
