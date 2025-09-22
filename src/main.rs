@@ -1,4 +1,6 @@
-use osm_import_rust::{self, check_batch_file_status, BatchFileStatus, ImportOptions, OsmFileType};
+use osm_import_rust::{
+    self, check_batch_file_status, BatchFileStatus, DeltaAbc, FullDate, ImportOptions, OsmFileType,
+};
 use std::env;
 use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
@@ -18,25 +20,18 @@ use osm_import::{
 fn get_import_options(import_type: Option<ImportType>) -> Result<ImportOptions, String> {
     match import_type {
         Some(ImportType::FullDate(date)) => {
-            if !date.chars().all(|c| c.is_ascii_digit()) || date.len() != 6 {
-                Err("date arg invalid (expected ddmmyy)".to_string())
-            } else {
-                Ok(ImportOptions {
-                    osm_file_type: OsmFileType::Full(date.clone()),
-                    base_path: "./data/".to_string(),
-                })
-            }
+            let validated_date = FullDate::new(date)?;
+            Ok(ImportOptions {
+                osm_file_type: OsmFileType::Full(validated_date),
+                base_path: "./data/".to_string(),
+            })
         }
         Some(ImportType::DeltaAbc(abc)) => {
-            if abc.matches('/').count() != 2 || !abc.chars().all(|c| c.is_ascii_digit() || c == '/')
-            {
-                Err("abc arg invalid (expected AAA/BBB/CCC)".to_string())
-            } else {
-                Ok(ImportOptions {
-                    osm_file_type: OsmFileType::Delta(abc.clone()),
-                    base_path: "./data/".to_string(),
-                })
-            }
+            let validated_abc = DeltaAbc::new(abc)?;
+            Ok(ImportOptions {
+                osm_file_type: OsmFileType::Delta(validated_abc),
+                base_path: "./data/".to_string(),
+            })
         }
         None => Err("import type is unknown".to_string()),
     }

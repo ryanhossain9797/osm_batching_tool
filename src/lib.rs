@@ -8,6 +8,48 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{error, info, warn};
 
+#[derive(Debug, Clone)]
+pub struct FullDate(String);
+
+#[derive(Debug, Clone)]
+pub struct DeltaAbc(String);
+
+impl FullDate {
+    pub fn new(date: String) -> Result<Self, String> {
+        let date_regex = Regex::new(r"^[0-9]{6}$").map_err(|_| "Failed to compile date regex")?;
+        if !date_regex.is_match(&date) {
+            return Err(format!("Invalid date format: {} (expected ddmmyy)", date));
+        }
+        Ok(FullDate(date))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl DeltaAbc {
+    pub fn new(abc: String) -> Result<Self, String> {
+        let abc_regex = Regex::new(r"^[0-9]{3}/[0-9]{3}/[0-9]{3}$")
+            .map_err(|_| "Failed to compile ABC regex")?;
+        if !abc_regex.is_match(&abc) {
+            return Err(format!(
+                "Invalid ABC format: {} (expected AAA/BBB/CCC)",
+                abc
+            ));
+        }
+        Ok(DeltaAbc(abc))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_underscore(&self) -> String {
+        self.0.replace("/", "_")
+    }
+}
+
 #[derive(Debug)]
 pub enum BatchFileStatus {
     FileReadSuccessfully(String),
@@ -23,8 +65,8 @@ struct RootElementInfo {
 }
 
 pub enum OsmFileType {
-    Full(String),
-    Delta(String),
+    Full(FullDate),
+    Delta(DeltaAbc),
 }
 
 pub struct ImportOptions {
@@ -40,8 +82,8 @@ impl ImportOptions {
     }
     fn get_import_scope(&self) -> String {
         match &self.osm_file_type {
-            OsmFileType::Full(date) => date.clone(),
-            OsmFileType::Delta(abc) => abc.replace("/", "_"),
+            OsmFileType::Full(date) => date.as_str().to_string(),
+            OsmFileType::Delta(abc) => abc.as_underscore(),
         }
     }
     fn get_import_dir(&self) -> String {
@@ -121,35 +163,7 @@ pub async fn check_batch_file_status(
 
 pub async fn process_osm_import(import_options: &ImportOptions) -> Result<()> {
     info!("🔧 Starting OSM import processing");
-
-    // Validate input
-    let date_regex = Regex::new(r"^[0-9]{6}$")?;
-    let abc_regex = Regex::new(r"^[0-9]{3}/[0-9]{3}/[0-9]{3}$")?;
-
-    info!("✅ Validating input parameters...");
     let import_scope = import_options.get_import_scope();
-    match import_options.osm_file_type {
-        OsmFileType::Full(_) => {
-            if !date_regex.is_match(&import_scope) {
-                error!("❌ Invalid date format: {} (expected ddmmyy)", import_scope);
-                anyhow::bail!("Invalid date format: {} (expected ddmmyy)", import_scope);
-            }
-            info!("✅ Date format validated: {}", import_scope);
-        }
-        OsmFileType::Delta(_) => {
-            if !abc_regex.is_match(&import_scope) {
-                error!(
-                    "❌ Invalid ABC format: {} (expected AAA/BBB/CCC)",
-                    import_scope
-                );
-                anyhow::bail!(
-                    "Invalid ABC format: {} (expected AAA/BBB/CCC)",
-                    import_scope
-                );
-            }
-            info!("✅ ABC format validated: {}", import_scope);
-        }
-    }
 
     let import_dir = import_options.get_import_dir();
 
@@ -159,7 +173,8 @@ pub async fn process_osm_import(import_options: &ImportOptions) -> Result<()> {
     info!("✅ Directories created successfully");
 
     // Create lock file
-    let lock_file_path = format!("{}/lock", import_dir);
+    let lock_file_path = import_options.get_lock_file();
+
     info!("🔒 Creating lock file: {}", lock_file_path);
     fs::write(&lock_file_path, "locked").await?;
     info!("✅ Lock file created successfully");
