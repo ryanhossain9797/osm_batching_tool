@@ -2,9 +2,8 @@ use osm_import_rust::{
     self, check_batch_file_status, BatchFileStatus, DeltaAbc, FullDate, ImportOptions, OsmFileType,
 };
 use std::env;
-use std::path::Path;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{error, info};
+use tracing::info;
 
 // Include generated protobuf code
 pub mod osm_import {
@@ -34,23 +33,6 @@ fn get_import_options(import_type: Option<ImportType>) -> Result<ImportOptions, 
             })
         }
         None => Err("import type is unknown".to_string()),
-    }
-}
-
-async fn maybe_start_background_processing(import_options: ImportOptions) {
-    let import_lock_file = import_options.get_lock_file();
-    if !Path::new(&import_lock_file).exists() {
-        info!("🚀 No lock file found - starting background processing");
-        tokio::spawn(async move {
-            info!("🎯 Background task started");
-            if let Err(e) = osm_import_rust::process_osm_import(&import_options).await {
-                error!("💥 Background processing failed: {e}");
-            } else {
-                info!("🎉 Background processing completed successfully");
-            }
-        });
-    } else {
-        info!("🔒 Lock file exists - processing already in progress");
     }
 }
 
@@ -94,7 +76,7 @@ impl OsmImport for OSMImportService {
                 };
 
                 if should_attempt_import {
-                    maybe_start_background_processing(options).await;
+                    osm_import_rust::maybe_start_background_processing(options).await;
                 }
 
                 Ok(Response::new(FetchImportBatchResponse {
