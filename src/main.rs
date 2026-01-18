@@ -5,7 +5,6 @@ use std::env;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::info;
 
-// Include generated protobuf code
 pub mod osm_import {
     tonic::include_proto!("osm_import");
 }
@@ -89,7 +88,6 @@ impl OsmImport for OSMImportService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -104,7 +102,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let osm_service = OSMImportService::default();
 
-    // Start gRPC server
     Server::builder()
         .add_service(OsmImportServer::new(osm_service))
         .serve(grpc_addr)

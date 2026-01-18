@@ -19,8 +19,8 @@ tonic-prost = "0.14"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-quick-xml = "0.38"
-reqwest = { version = "0.12", features = ["stream"] }
+quick-xml = "0.39"
+reqwest = { version = "0.13", features = ["stream"] }
 flate2 = "1.1"
 regex = "1.11"
 futures-util = "0.3"

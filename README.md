@@ -1,6 +1,6 @@
 # OSM Batching Tool
 
-A high-performance Rust service for downloading, processing, and batching OpenStreetMap (OSM) data via gRPC. This service provides efficient batch processing of OSM full imports and delta updates for geographic data pipelines.
+A high-performance Rust service for downloading, processing, and batching OpenStreetMap (OSM) data of Bangladesh via gRPC. This service provides efficient batch processing of OSM full imports and delta updates for geographic data pipelines.
 
 ## What This Project Does
 
